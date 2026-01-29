@@ -1,0 +1,306 @@
+name: 'Deploy to Amazon ECS'
+description: 'Build Docker image, push to ECR, and deploy to one or more ECS services'
+author: 'Your Name'
+
+branding:
+  icon: 'upload-cloud'
+  color: 'orange'
+
+inputs:
+  # AWS Configuration
+  aws-access-key-id:
+    description: 'AWS Access Key ID'
+    required: true
+  aws-secret-access-key:
+    description: 'AWS Secret Access Key'
+    required: true
+  aws-region:
+    description: 'AWS Region'
+    required: true
+
+  # ECR Configuration
+  ecr-repository:
+    description: 'ECR Repository name'
+    required: true
+
+  # ECS Configuration
+  ecs-cluster:
+    description: 'ECS Cluster name'
+    required: true
+  services:
+    description: |
+      JSON array of services to deploy. Each service has its own task definition and containers.
+
+      Simple format (all containers use the built image):
+      [
+        {"task_def": "api-task", "service": "api-svc", "containers": ["api", "nginx"]}
+      ]
+
+      Advanced format (different images per container):
+      [
+        {
+          "task_def": "api-task",
+          "service": "api-svc",
+          "containers": [
+            {"name": "api"},
+            {"name": "nginx", "image": "nginx:1.25"},
+            {"name": "datadog", "image": "datadog/agent:latest"}
+          ]
+        }
+      ]
+
+      Use "image": "skip" to leave a container unchanged.
+    required: true
+
+  # Docker Build Options
+  dockerfile-path:
+    description: 'Path to Dockerfile context'
+    required: false
+    default: '.'
+  docker-build-args:
+    description: 'Docker build arguments'
+    required: false
+    default: ''
+  docker-platform:
+    description: 'Docker platform (e.g., linux/arm64, linux/amd64)'
+    required: false
+    default: 'linux/arm64'
+  image-tag:
+    description: 'Image tag (defaults to git sha)'
+    required: false
+    default: ''
+
+  # Deployment Options
+  wait-for-service-stability:
+    description: 'Wait for ECS services to stabilize'
+    required: false
+    default: 'true'
+
+  # Version File (for tag-based deployments)
+  update-version-file:
+    description: 'Update version file from git tag (use with tag triggers)'
+    required: false
+    default: 'false'
+  version-file-path:
+    description: 'Path to version file'
+    required: false
+    default: 'version.txt'
+  version-target-branch:
+    description: 'Branch to push version update to'
+    required: false
+    default: 'main'
+
+  # Slack Notifications
+  slack-bot-token:
+    description: 'Slack Bot Token'
+    required: false
+    default: ''
+  slack-channel:
+    description: 'Slack channel for notifications'
+    required: false
+    default: ''
+
+outputs:
+  image:
+    description: 'Full ECR image URI'
+    value: ${{ steps.build-image.outputs.image }}
+  version:
+    description: 'Version from git tag (if update-version-file is enabled)'
+    value: ${{ steps.update-version.outputs.version }}
+
+runs:
+  using: 'composite'
+  steps:
+    # ===== AWS & Docker Setup =====
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v3
+
+    - name: Setup Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # ===== Build & Push Image =====
+    - name: Determine image tag
+      id: image-tag
+      shell: bash
+      run: |
+        if [ -n "${{ inputs.image-tag }}" ]; then
+          echo "tag=${{ inputs.image-tag }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build and push image to ECR
+      id: build-image
+      shell: bash
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        IMAGE_TAG: ${{ steps.image-tag.outputs.tag }}
+        ECR_REPOSITORY: ${{ inputs.ecr-repository }}
+        DOCKER_PLATFORM: ${{ inputs.docker-platform }}
+        DOCKERFILE_PATH: ${{ inputs.dockerfile-path }}
+        DOCKER_BUILD_ARGS: ${{ inputs.docker-build-args }}
+      run: |
+        docker buildx build \
+          --platform $DOCKER_PLATFORM \
+          --push \
+          $DOCKER_BUILD_ARGS \
+          -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG \
+          -t $ECR_REGISTRY/$ECR_REPOSITORY:latest \
+          $DOCKERFILE_PATH
+        echo "image=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+    # ===== Deploy to ECS Services =====
+    - name: Deploy to ECS services
+      id: deploy
+      shell: bash
+      env:
+        SERVICES_JSON: ${{ inputs.services }}
+        BUILT_IMAGE: ${{ steps.build-image.outputs.image }}
+        ECS_CLUSTER: ${{ inputs.ecs-cluster }}
+        WAIT_FOR_STABILITY: ${{ inputs.wait-for-service-stability }}
+      run: |
+        set -e
+
+        SERVICE_COUNT=$(echo "$SERVICES_JSON" | jq 'length')
+        echo "Deploying to $SERVICE_COUNT service(s)..."
+        echo ""
+
+        for i in $(seq 0 $((SERVICE_COUNT - 1))); do
+          svc=$(echo "$SERVICES_JSON" | jq -c ".[$i]")
+          TASK_DEF=$(echo "$svc" | jq -r '.task_def')
+          SERVICE=$(echo "$svc" | jq -r '.service')
+          CONTAINERS=$(echo "$svc" | jq -c '.containers')
+
+          echo "══════════════════════════════════════════"
+          echo "[$((i + 1))/$SERVICE_COUNT] Service: $SERVICE"
+          echo "  Task Definition: $TASK_DEF"
+          echo "══════════════════════════════════════════"
+
+          # Get current task definition
+          TASK_DEF_FILE="task-def-${SERVICE}.json"
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_DEF" \
+            --query 'taskDefinition' > "$TASK_DEF_FILE"
+
+          # Update each container's image
+          CONTAINER_COUNT=$(echo "$CONTAINERS" | jq 'length')
+          for j in $(seq 0 $((CONTAINER_COUNT - 1))); do
+            CONTAINER_ENTRY=$(echo "$CONTAINERS" | jq -c ".[$j]")
+
+            # Check if it's a string (simple format) or object (advanced format)
+            if echo "$CONTAINER_ENTRY" | jq -e 'type == "string"' > /dev/null 2>&1; then
+              # Simple format: just container name, use built image
+              CONTAINER_NAME=$(echo "$CONTAINER_ENTRY" | jq -r '.')
+              TARGET_IMAGE="$BUILT_IMAGE"
+            else
+              # Advanced format: object with name and optional image
+              CONTAINER_NAME=$(echo "$CONTAINER_ENTRY" | jq -r '.name')
+              CUSTOM_IMAGE=$(echo "$CONTAINER_ENTRY" | jq -r '.image // empty')
+
+              if [ "$CUSTOM_IMAGE" == "skip" ]; then
+                echo "  → Skipping container: $CONTAINER_NAME"
+                continue
+              elif [ -n "$CUSTOM_IMAGE" ]; then
+                TARGET_IMAGE="$CUSTOM_IMAGE"
+              else
+                TARGET_IMAGE="$BUILT_IMAGE"
+              fi
+            fi
+
+            echo "  → Updating container: $CONTAINER_NAME → $TARGET_IMAGE"
+            jq --arg container "$CONTAINER_NAME" --arg image "$TARGET_IMAGE" \
+              '.containerDefinitions = [.containerDefinitions[] | if .name == $container then .image = $image else . end]' \
+              "$TASK_DEF_FILE" > tmp.json && mv tmp.json "$TASK_DEF_FILE"
+          done
+
+          # Remove fields not allowed in RegisterTaskDefinition
+          jq 'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)' \
+            "$TASK_DEF_FILE" > "final-${TASK_DEF_FILE}"
+
+          # Register new task definition
+          NEW_TASK_DEF_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://"final-${TASK_DEF_FILE}" \
+            --query 'taskDefinition.taskDefinitionArn' \
+            --output text)
+          echo "  ✓ Registered: $NEW_TASK_DEF_ARN"
+
+          # Update service
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$SERVICE" \
+            --task-definition "$NEW_TASK_DEF_ARN" \
+            --no-cli-pager > /dev/null
+          echo "  ✓ Service updated"
+          echo ""
+        done
+
+        # Wait for stability
+        if [ "$WAIT_FOR_STABILITY" == "true" ]; then
+          echo "Waiting for services to stabilize..."
+          SERVICES_LIST=$(echo "$SERVICES_JSON" | jq -r '.[].service' | tr '\n' ' ')
+          aws ecs wait services-stable \
+            --cluster "$ECS_CLUSTER" \
+            --services $SERVICES_LIST
+          echo "✓ All services stable!"
+        fi
+
+    # ===== Update Version File =====
+    - name: Update version file
+      if: inputs.update-version-file == 'true'
+      id: update-version
+      shell: bash
+      env:
+        VERSION_FILE: ${{ inputs.version-file-path }}
+        TARGET_BRANCH: ${{ inputs.version-target-branch }}
+      run: |
+        VERSION=${GITHUB_REF_NAME#v}
+
+        if ! [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]; then
+          echo "Error: Invalid version format: $VERSION"
+          echo "Expected: X.Y.Z or X.Y.Z-prerelease"
+          exit 1
+        fi
+
+        echo "$VERSION" > "$VERSION_FILE"
+
+        git config --global user.name "GitHub Actions Bot"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        git add "$VERSION_FILE"
+
+        if ! git diff --staged --quiet; then
+          git commit -m "Update $VERSION_FILE to $VERSION [skip ci]"
+          git push origin HEAD:$TARGET_BRANCH
+          echo "✓ Version file updated to $VERSION"
+        fi
+
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+    # ===== Slack Notifications =====
+    - name: Notify Slack success
+      if: success() && inputs.slack-bot-token != '' && inputs.slack-channel != ''
+      uses: slackapi/slack-github-action@v1.26.0
+      with:
+        channel-id: ${{ inputs.slack-channel }}
+        slack-message: "✅ *Deployment succeeded*\nRepo: `${{ github.repository }}`\nRef: `${{ github.ref_name }}`\nImage: `${{ steps.build-image.outputs.image }}`"
+      env:
+        SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}
+
+    - name: Notify Slack failure
+      if: failure() && inputs.slack-bot-token != '' && inputs.slack-channel != ''
+      uses: slackapi/slack-github-action@v1.26.0
+      with:
+        channel-id: ${{ inputs.slack-channel }}
+        slack-message: "❌ *Deployment failed*\nRepo: `${{ github.repository }}`\nRef: `${{ github.ref_name }}`\nWorkflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      env:
+        SLACK_BOT_TOKEN: ${{ inputs.slack-bot-token }}

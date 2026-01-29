@@ -1,0 +1,46 @@
+# Deploy to Prod on version tag + update version file
+# Place in your repo at: .github/workflows/deploy-prod.yml
+
+name: Deploy to Production
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on v1.0.0, v2.1.3-beta, etc.
+
+permissions:
+  contents: write  # Required for version file push
+
+jobs:
+  deploy:
+    environment: prod
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.REPO_PUSH_TOKEN }}  # PAT with push access
+
+      - uses: your-org/ecs-deploy-action@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          ecr-repository: ${{ vars.ECR_REPOSITORY }}
+          ecs-cluster: ${{ vars.ECS_CLUSTER }}
+          services: |
+            [
+              {
+                "task_def": "${{ vars.ECS_TASK_DEF_API }}",
+                "service": "${{ vars.ECS_SERVICE_API }}",
+                "containers": ["${{ vars.CONTAINER_NAME_API }}"]
+              },
+              {
+                "task_def": "${{ vars.ECS_TASK_DEF_CONSUMER }}",
+                "service": "${{ vars.ECS_SERVICE_CONSUMER }}",
+                "containers": ["${{ vars.CONTAINER_NAME_CONSUMER }}"]
+              }
+            ]
+          update-version-file: 'true'
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel: ${{ vars.SLACK_CHANNEL_PROD }}

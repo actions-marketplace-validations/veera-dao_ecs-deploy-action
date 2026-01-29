@@ -1,0 +1,46 @@
+# Example: Different images for different containers
+# Place in your repo at: .github/workflows/deploy.yml
+
+name: Deploy with Multiple Images
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: your-org/ecs-deploy-action@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+          ecr-repository: my-app
+          ecs-cluster: prod-cluster
+          services: |
+            [
+              {
+                "task_def": "api-task",
+                "service": "api-svc",
+                "containers": [
+                  {"name": "api"},
+                  {"name": "nginx", "image": "nginx:1.25-alpine"},
+                  {"name": "datadog-agent", "image": "datadog/agent:7"}
+                ]
+              },
+              {
+                "task_def": "worker-task",
+                "service": "worker-svc",
+                "containers": [
+                  {"name": "worker"},
+                  {"name": "redis", "image": "redis:7-alpine"},
+                  {"name": "fluentbit", "image": "skip"}
+                ]
+              }
+            ]
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel: deployments

@@ -1,0 +1,41 @@
+# Deploy to Beta on push to main
+# Place in your repo at: .github/workflows/deploy-beta.yml
+
+name: Deploy to Beta
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    environment: beta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: your-org/ecs-deploy-action@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+          ecr-repository: ${{ vars.ECR_REPOSITORY }}
+          ecs-cluster: ${{ vars.ECS_CLUSTER }}
+          services: |
+            [
+              {
+                "task_def": "${{ vars.ECS_TASK_DEF_API }}",
+                "service": "${{ vars.ECS_SERVICE_API }}",
+                "containers": ["${{ vars.CONTAINER_NAME_API }}"]
+              },
+              {
+                "task_def": "${{ vars.ECS_TASK_DEF_WORKER }}",
+                "service": "${{ vars.ECS_SERVICE_WORKER }}",
+                "containers": ["${{ vars.CONTAINER_NAME_WORKER }}"]
+              }
+            ]
+          slack-bot-token: ${{ secrets.SLACK_BOT_TOKEN }}
+          slack-channel: ${{ vars.SLACK_CHANNEL_BETA }}
