@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: your-org/ecs-deploy-action@v1
+      - uses: veera-dao/ecs-deploy-action@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -67,7 +67,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.REPO_PUSH_TOKEN }}
 
-      - uses: your-org/ecs-deploy-action@v1
+      - uses: veera-dao/ecs-deploy-action@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

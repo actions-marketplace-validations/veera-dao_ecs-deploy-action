@@ -1,6 +1,6 @@
 name: 'Deploy to Amazon ECS'
 description: 'Build Docker image, push to ECR, and deploy to one or more ECS services'
-author: 'Your Name'
+author: 'veera-dao'
 
 branding:
   icon: 'upload-cloud'
